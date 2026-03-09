@@ -3,7 +3,7 @@ import { Helmet } from 'react-helmet'
 import { Link, useSearch } from "wouter"
 import { FeedCard } from "../components/feed_card"
 import { Waiting } from "../components/loading"
-import { client } from "../main"
+import { client } from "../app/runtime"
 import { ProfileContext } from "../state/profile"
 
 import { useSiteConfig } from "../hooks/useSiteConfig";
@@ -36,7 +36,8 @@ export function FeedsPage() {
         normal: { size: 0, data: [], hasNext: false }
     })
     const page = tryInt(1, query.get("page"))
-    const limit = tryInt(10, query.get("limit"), siteConfig.pageSize)
+    const limit = tryInt(siteConfig.pageSize, query.get("limit"))
+    const feedListClass = siteConfig.feedLayout === "masonry" ? "wauto columns-1 gap-5 ani-show md:columns-2" : "wauto flex flex-col ani-show";
     const ref = useRef("")
     function fetchFeeds(type: FeedType) {
         client.feed.list({
@@ -54,7 +55,7 @@ export function FeedsPage() {
         })
     }
     useEffect(() => {
-        const key = `${query.get("page")} ${query.get("type")}`
+        const key = `${query.get("page")} ${query.get("type")} ${limit}`
         if (ref.current == key) return
         const type = query.get("type") as FeedType || 'normal'
         if (type !== listState) {
@@ -63,7 +64,7 @@ export function FeedsPage() {
         setStatus('loading')
         fetchFeeds(type)
         ref.current = key
-    }, [query.get("page"), query.get("type")])
+    }, [limit, query.get("page"), query.get("type")])
     return (
         <>
             <Helmet>
@@ -97,7 +98,7 @@ export function FeedsPage() {
                         </div>
                     </div>
                     <Waiting for={status === 'idle'}>
-                        <div className="wauto flex flex-col ani-show">
+                        <div className={feedListClass}>
                             {feeds[listState].data.map(({ id, ...feed }: any) => (
                                 <FeedCard key={id} id={id} {...feed} />
                             ))}

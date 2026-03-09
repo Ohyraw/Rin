@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { startTime, endTime } from "hono/timing";
 import type { DB } from "../core/hono-types";
+import { profileAsync } from "../core/server-timing";
 import { feedHashtags, hashtags } from "../db/schema";
 import type { AppContext } from "../core/hono-types";
 
@@ -10,35 +10,29 @@ export function TagService(): Hono {
 
     // GET /tag
     app.get('/', async (c: AppContext) => {
-        startTime(c, 'tag-list');
         const db = c.get('db');
         
-        startTime(c, 'db-query');
-        const tag_list = await db.query.hashtags.findMany({
+        const tag_list = await profileAsync(c, 'tag_list_db', () => db.query.hashtags.findMany({
             with: {
                 feeds: { columns: { feedId: true } }
             }
-        });
-        endTime(c, 'db-query');
+        }));
         
         const result = tag_list.map((tag: any) => ({
             ...tag,
             feeds: tag.feeds.length
         }));
         
-        endTime(c, 'tag-list');
         return c.json(result);
     });
 
     // GET /tag/:name
     app.get('/:name', async (c: AppContext) => {
-        startTime(c, 'tag-get');
         const db = c.get('db');
         const admin = c.get('admin');
         const nameDecoded = decodeURI(c.req.param('name'));
         
-        startTime(c, 'db-query');
-        const tag = await db.query.hashtags.findFirst({
+        const tag = await profileAsync(c, 'tag_detail_db', () => db.query.hashtags.findFirst({
             where: eq(hashtags.name, nameDecoded),
             with: {
                 feeds: {
@@ -60,13 +54,7 @@ export function TagService(): Hono {
                     }
                 }
             }
-        });
-        endTime(c, 'db-query');
-        
-        if (!tag) {
-            endTime(c, 'tag-get');
-            return c.text('Not found', 404);
-        }
+        }));
         
         const tagFeeds = tag?.feeds.map((tagFeed: any) => {
             if (!tagFeed.feed) return null;
@@ -76,7 +64,10 @@ export function TagService(): Hono {
             };
         }).filter((feed: any) => feed !== null);
         
-        endTime(c, 'tag-get');
+        if (!tag) {
+            return c.text('Not found', 404);
+        }
+        
         return c.json({ ...tag, feeds: tagFeeds });
     });
 

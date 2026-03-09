@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next"
 import { Link, useSearch } from "wouter"
 import { FeedCard } from "../components/feed_card"
 import { Waiting } from "../components/loading"
-import { client } from "../main"
+import { client } from "../app/runtime"
 
 import { useSiteConfig } from "../hooks/useSiteConfig";
 import { siteName } from "../utils/constants"
@@ -23,11 +23,15 @@ export function SearchPage({ keyword }: { keyword: string }) {
     const [status, setStatus] = useState<'loading' | 'idle'>('idle')
     const [feeds, setFeeds] = useState<FeedsData>()
     const page = tryInt(1, query.get("page"))
-    const limit = tryInt(10, query.get("limit"), siteConfig.pageSize)
+    const limit = tryInt(siteConfig.pageSize, query.get("limit"))
+    const feedListClass = siteConfig.feedLayout === "masonry" ? "wauto columns-1 gap-5 md:columns-2" : "wauto flex flex-col";
     const ref = useRef("")
     function fetchFeeds() {
         if (!keyword) return
-        client.search.search(keyword).then(({ data }) => {
+        client.search.search(keyword, {
+            page,
+            limit,
+        }).then(({ data }) => {
             if (data) {
                 setFeeds(data)
                 setStatus('idle')
@@ -65,21 +69,21 @@ export function SearchPage({ keyword }: { keyword: string }) {
                         </div>
                     </div>
                     <Waiting for={status === 'idle'}>
-                        <div className="wauto flex flex-col">
+                        <div className={feedListClass}>
                             {feeds?.data.map(({ id, ...feed }: any) => (
                                 <FeedCard key={id} id={id} {...feed} />
                             ))}
                         </div>
                         <div className="wauto flex flex-row items-center mt-4 ani-show">
                             {page > 1 &&
-                                <Link href={`?page=${(page - 1)}`}
+                                <Link href={`?page=${(page - 1)}&limit=${limit}`}
                                     className={`text-sm font-normal rounded-full px-4 py-2 text-white bg-theme`}>
                                     {t('previous')}
                                 </Link>
                             }
                             <div className="flex-1" />
                             {feeds?.hasNext &&
-                                <Link href={`?page=${(page + 1)}`}
+                                <Link href={`?page=${(page + 1)}&limit=${limit}`}
                                     className={`text-sm font-normal rounded-full px-4 py-2 text-white bg-theme`}>
                                     {t('next')}
                                 </Link>

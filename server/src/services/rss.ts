@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { startTime, endTime } from "hono/timing";
 import type { AppContext } from "../core/hono-types";
+import { profileAsync } from "../core/server-timing";
 import { feeds, users } from "../db/schema";
 import { extractImage } from "../utils/image";
 import { path_join } from "../utils/path";
@@ -42,40 +42,26 @@ export function RSSService(): Hono {
 
     // GET /rss.xml
     app.get('/rss.xml', async (c: AppContext) => {
-        startTime(c, 'rss-feed');
-        const result = await handleFeed(c, 'rss.xml');
-        endTime(c, 'rss-feed');
-        return result;
+        return handleFeed(c, 'rss.xml');
     });
 
     // GET /atom.xml
     app.get('/atom.xml', async (c: AppContext) => {
-        startTime(c, 'atom-feed');
-        const result = await handleFeed(c, 'atom.xml');
-        endTime(c, 'atom-feed');
-        return result;
+        return handleFeed(c, 'atom.xml');
     });
 
     // GET /rss.json
     app.get('/rss.json', async (c: AppContext) => {
-        startTime(c, 'rss-json');
-        const result = await handleFeed(c, 'rss.json');
-        endTime(c, 'rss-json');
-        return result;
+        return handleFeed(c, 'rss.json');
     });
 
     // GET /feed.json
     app.get('/feed.json', async (c: AppContext) => {
-        startTime(c, 'feed-json');
-        const result = await handleFeed(c, 'feed.json');
-        endTime(c, 'feed-json');
-        return result;
+        return handleFeed(c, 'feed.json');
     });
 
     // Support legacy feed.xml - redirect to rss.xml
     app.get('/feed.xml', async (c: AppContext) => {
-        startTime(c, 'legacy-feed');
-        endTime(c, 'legacy-feed');
         return c.redirect('/rss.xml', 301);
     });
 
@@ -83,7 +69,6 @@ export function RSSService(): Hono {
 }
 
 async function handleFeed(c: AppContext, fileName: string) {
-    startTime(c, 'handleFeed');
     const env = c.get('env');
     const db = c.get('db');
 
@@ -105,33 +90,30 @@ async function handleFeed(c: AppContext, fileName: string) {
     const key = path_join(folder, fileName);
     const cleanHost = host.endsWith('/') ? host.slice(0, -1) : host;
     const url = `${cleanHost}/${key}`;
-
+    
     // Check if S3 is properly configured (not default/placeholder values)
-    const s3Configured = host &&
-                       !host.includes('your-') &&
+    const s3Configured = host && 
+                       !host.includes('your-') && 
                        !host.includes('undefined') &&
-                       env.S3_BUCKET &&
+                       env.S3_BUCKET && 
                        !env.S3_BUCKET.includes('your-bucket');
-
+    
     if (s3Configured) {
         try {
             console.log(`[RSS] Fetching from S3: ${url}`);
-            startTime(c, 's3-fetch');
-            const response = await fetch(url, {
-                cf: { cacheTtl: 60 }
-            });
-            endTime(c, 's3-fetch');
-
+            const response = await profileAsync(c, 'rss_s3_fetch', () => fetch(url, { 
+                cf: { cacheTtl: 60 } 
+            }));
+            
             if (response.ok) {
                 console.log(`[RSS] S3 hit!`);
-                const text = await response.text();
-                endTime(c, 'handleFeed');
+                const text = await profileAsync(c, 'rss_s3_body', () => response.text());
                 return c.text(text, 200, {
                     'Content-Type': contentType,
                     'Cache-Control': 'public, max-age=3600',
                 });
             }
-
+            
             if (response.status !== 404) {
                 console.log(`[RSS] S3 error: ${response.status}, falling back to generation`);
             }
@@ -141,46 +123,46 @@ async function handleFeed(c: AppContext, fileName: string) {
     } else {
         console.log(`[RSS] S3 not configured, generating feed in real-time`);
     }
-
+    
     // Generate feed in real-time (fallback or primary mode)
     try {
         console.log(`[RSS] Generating ${fileName} in real-time...`);
         const frontendUrl = new URL(c.req.url).origin;
-        startTime(c, 'generateFeed');
-        const feed = await generateFeed(env, db, frontendUrl);
-        endTime(c, 'generateFeed');
-
+        const feed = await profileAsync(c, 'rss_generate_feed', () => generateFeed(env, db, frontendUrl, c));
+        
         let content: string;
         switch (fileName) {
             case 'rss.xml':
-                content = feed.rss2();
+                content = await profileAsync(c, 'rss_render_rss2', () => Promise.resolve(feed.rss2()));
                 break;
             case 'atom.xml':
-                content = feed.atom1();
+                content = await profileAsync(c, 'rss_render_atom', () => Promise.resolve(feed.atom1()));
                 break;
             case 'rss.json':
             case 'feed.json':
-                content = feed.json1();
+                content = await profileAsync(c, 'rss_render_json', () => Promise.resolve(feed.json1()));
                 break;
             default:
-                content = feed.rss2();
+                content = await profileAsync(c, 'rss_render_default', () => Promise.resolve(feed.rss2()));
         }
-
-        endTime(c, 'handleFeed');
+        
         return c.text(content, 200, {
             'Content-Type': contentType,
             'Cache-Control': 'public, max-age=300', // Shorter cache for real-time
         });
     } catch (genError: any) {
         console.error('[RSS] Generation failed:', genError);
-        endTime(c, 'handleFeed');
         return c.text(`RSS generation failed: ${genError.message}`, 500);
     }
 }
 
 // Extract feed generation logic for reuse
-async function generateFeed(env: Env, db: DB, frontendUrl: string) {
-    await initRSSModules();
+async function generateFeed(env: Env, db: DB, frontendUrl: string, c?: AppContext) {
+    if (c) {
+        await profileAsync(c, 'rss_init_modules', () => initRSSModules());
+    } else {
+        await initRSSModules();
+    }
     const accessHost = env.S3_ACCESS_HOST || env.S3_ENDPOINT;
     const faviconKey = getFaviconKey(env);
 
@@ -201,7 +183,9 @@ async function generateFeed(env: Env, db: DB, frontendUrl: string) {
     };
 
     if (!feedConfig.title) {
-        const user = await db.query.users.findFirst({ where: eq(users.id, 1) });
+        const user = c
+            ? await profileAsync(c, 'rss_user_lookup', () => db.query.users.findFirst({ where: eq(users.id, 1) }))
+            : await db.query.users.findFirst({ where: eq(users.id, 1) });
         if (user) {
             feedConfig.title = user.username;
         }
@@ -212,7 +196,9 @@ async function generateFeed(env: Env, db: DB, frontendUrl: string) {
         for (const [_mimeType, ext] of Object.entries(FAVICON_ALLOWED_TYPES)) {
             const originFaviconKey = path_join(env.S3_FOLDER || "", `originFavicon${ext}`);
             try {
-                const response = await fetch(new Request(`${accessHost}/${originFaviconKey}`));
+                const response = c
+                    ? await profileAsync(c, 'rss_origin_favicon_fetch', () => fetch(new Request(`${accessHost}/${originFaviconKey}`)))
+                    : await fetch(new Request(`${accessHost}/${originFaviconKey}`));
                 if (response.ok) {
                     feedConfig.image = `${accessHost}/${originFaviconKey}`;
                     break;
@@ -223,7 +209,9 @@ async function generateFeed(env: Env, db: DB, frontendUrl: string) {
         }
 
         try {
-            const response = await fetch(new Request(`${accessHost}/${faviconKey}`));
+            const response = c
+                ? await profileAsync(c, 'rss_favicon_fetch', () => fetch(new Request(`${accessHost}/${faviconKey}`)))
+                : await fetch(new Request(`${accessHost}/${faviconKey}`));
             if (response.ok) {
                 feedConfig.favicon = `${accessHost}/${faviconKey}`;
             }
@@ -233,7 +221,16 @@ async function generateFeed(env: Env, db: DB, frontendUrl: string) {
     const feed = new Feed(feedConfig);
 
     // Get published feeds
-    const feed_list = await db.query.feeds.findMany({
+    const feed_list = c
+        ? await profileAsync(c, 'rss_feed_list', () => db.query.feeds.findMany({
+            where: and(eq(feeds.draft, 0), eq(feeds.listed, 1)),
+            orderBy: [desc(feeds.createdAt), desc(feeds.updatedAt)],
+            limit: 20,
+            with: {
+                user: { columns: { id: true, username: true, avatar: true } },
+            },
+        }))
+        : await db.query.feeds.findMany({
         where: and(eq(feeds.draft, 0), eq(feeds.listed, 1)),
         orderBy: [desc(feeds.createdAt), desc(feeds.updatedAt)],
         limit: 20,

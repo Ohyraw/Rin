@@ -27,6 +27,8 @@ export interface Feed {
   createdAt: string;
   updatedAt: string;
   ai_summary: string;
+  ai_summary_status: "idle" | "pending" | "processing" | "completed" | "failed";
+  ai_summary_error: string;
   hashtags: Array<{ id: number; name: string }>;
   user: {
     avatar: string | null;
@@ -358,9 +360,6 @@ export const API_PATHS = {
 
   // RSS
   RSS_GET: (name: string) => `/${encodeURIComponent(name)}`,
-
-  // SEO
-  SEO_GET: (path: string) => `/seo${path}`,
 } as const;
 
 export type APIEndpoint = typeof API_PATHS;

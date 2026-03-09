@@ -7,6 +7,37 @@ import { path_join } from "./path";
 
 export type CacheStorageMode = 'database' | 's3';
 
+type CacheConfigReader = {
+    getOrDefault<T>(key: string, defaultValue: T): Promise<T>;
+};
+
+function normalizeCacheEnabled(value: unknown) {
+    if (typeof value === "boolean") {
+        return value;
+    }
+
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "true") {
+            return true;
+        }
+        if (normalized === "false") {
+            return false;
+        }
+    }
+
+    if (typeof value === "number") {
+        return value !== 0;
+    }
+
+    return Boolean(value);
+}
+
+export async function isPublicCacheEnabled(clientConfig: CacheConfigReader) {
+    const value = await clientConfig.getOrDefault("cache.enabled", false);
+    return normalizeCacheEnabled(value);
+}
+
 // 存储提供者接口
 interface StorageProvider {
     load(): Promise<void>;
@@ -176,8 +207,16 @@ export class CacheImpl {
     type: string;
     loaded: boolean = false;
     private storageProvider: StorageProvider;
+    private cacheEnabled: Promise<boolean> | null = null;
+    private configReader?: CacheConfigReader;
 
-    constructor(db: DB, env: Env, type: string = "cache", storageMode?: CacheStorageMode) {
+    constructor(
+        db: DB,
+        env: Env,
+        type: string = "cache",
+        storageMode?: CacheStorageMode,
+        configReader?: CacheConfigReader,
+    ) {
         // 确保 type 不为空，防止不同类型共享同一个存储位置
         if (!type || type.trim() === '') {
             throw new Error('Cache type cannot be empty');
@@ -186,6 +225,7 @@ export class CacheImpl {
         this.db = db;
         this.env = env;
         this.cache = new Map<string, any>();
+        this.configReader = configReader;
 
         // 优先级：参数 > 环境变量，默认为 s3 以向前兼容
         const mode = storageMode ?? (env.CACHE_STORAGE_MODE as CacheStorageMode) ?? 's3';
@@ -198,12 +238,34 @@ export class CacheImpl {
         }
     }
 
+    private async isEnabled() {
+        // Only the public content cache is gated by `cache.enabled`.
+        // Config stores must stay readable, otherwise `cache -> client.config`
+        // would recurse back into the same gate and break initialization.
+        if (this.type !== "cache") {
+            return true;
+        }
+
+        if (!this.configReader) {
+            return true;
+        }
+
+        if (!this.cacheEnabled) {
+            this.cacheEnabled = isPublicCacheEnabled(this.configReader);
+        }
+
+        return this.cacheEnabled;
+    }
+
     async load() {
         await this.storageProvider.load();
         this.loaded = true;
     }
 
     async all() {
+        if (!(await this.isEnabled())) {
+            return new Map<string, any>();
+        }
         if (!this.loaded) {
             await this.load();
         }
@@ -211,6 +273,9 @@ export class CacheImpl {
     }
 
     async get(key: string) {
+        if (!(await this.isEnabled())) {
+            return null;
+        }
         if (!this.loaded) {
             await this.load();
         }
@@ -218,6 +283,9 @@ export class CacheImpl {
     }
 
     async getByPrefix(prefix: string): Promise<any[]> {
+        if (!(await this.isEnabled())) {
+            return [];
+        }
         if (!this.loaded) {
             await this.load();
         }
@@ -231,6 +299,9 @@ export class CacheImpl {
     }
 
     async getBySuffix(suffix: string): Promise<any[]> {
+        if (!(await this.isEnabled())) {
+            return [];
+        }
         if (!this.loaded) {
             await this.load();
         }
@@ -244,6 +315,9 @@ export class CacheImpl {
     }
 
     async getOrSet<T>(key: string, value: () => Promise<T>) {
+        if (!(await this.isEnabled())) {
+            return value();
+        }
         const cached = await this.get(key);
         if (cached !== undefined) {
             console.log('Cache hit', key);
@@ -256,10 +330,16 @@ export class CacheImpl {
     }
 
     async getOrDefault<T>(key: string, defaultValue: T) {
+        if (!(await this.isEnabled())) {
+            return defaultValue;
+        }
         return this.getOrSet(key, async () => defaultValue);
     }
 
     async set(key: string, value: any, save: boolean = true) {
+        if (!(await this.isEnabled())) {
+            return;
+        }
         if (!this.loaded)
             await this.load();
         this.cache.set(key, value);
